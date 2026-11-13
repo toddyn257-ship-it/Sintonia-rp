@@ -1,0 +1,1666 @@
+--[[
+	WARNING: Heads up! This script has not been verified by ScriptBlox. Use at your own risk!
+]]
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+local CoreGui          = game:GetService("CoreGui")
+local LocalPlayer      = Players.LocalPlayer
+local Camera           = workspace.CurrentCamera
+local VirtualUser      = game:GetService("VirtualUser")
+
+local Config = {
+    Aimbot = {
+        Enabled = false, ShowPanel = false, TargetPart = "Head",
+        Sensitivity = 0.5, Strength = 0.8, MaxDistance = 500,
+        LimitToDistance = true, VisibleOnly = true, TeamCheck = false,
+        Unfocused = false, FOV = 150, ShowFOV = false, FOVAffectsAim = false,
+        FOVColor = Color3.fromRGB(160, 170, 210), FOVThickness = 1,
+        FOVTransparency = 0.65, HotkeyEnabled = false, HotkeyKey = "MouseButton2",
+        PredictionEnabled = false, BulletSpeed = 500, PredictionMultiplier = 1.0,
+        ManualHiddenLock = false, LockedTarget = nil, ForceRetarget = false,
+    },
+    ESP = {
+        Highlight = false, HighlightColor = Color3.fromRGB(255, 0, 0),
+        HighlightIntensity = 0.5, HighlightThickness = 5,
+        Box = false, BoxColor = Color3.fromRGB(255, 0, 0),
+        Lines = false, LinesColor = Color3.fromRGB(255, 255, 0),
+        Health = false, ShowName = false, ShowDistance = false,
+        TextHeightOffset = 18, TeamCheck = false, ThroughWalls = false, MaxDistance = 1500,
+    },
+    Swift = { Enabled = false, Level = 1, Holding = false },
+    Lixo = { Enabled = false, CheckWall = true, MaxColetas = 10, Coletados = 0 },
+}
+
+local UI = {}
+local aimbotHolding = false
+local stretchEnabled = false
+local stretchFOV = 70
+local originalFOV = Camera.FieldOfView or 70
+
+-- ✅ Flag global de "pular lixo" (verificada em TODOS os loops)
+local SkipCurrentLixoRequest = false
+
+-- ✅ Bloquear/Desbloquear controles do jogador
+local function BlockPlayerControls()
+    ContextActionService:BindAction("NugHub_BlockMove", function()
+        return Enum.ContextActionResult.Sink
+    end, false,
+        Enum.PlayerActions.CharacterForward,
+        Enum.PlayerActions.CharacterBackward,
+        Enum.PlayerActions.CharacterLeft,
+        Enum.PlayerActions.CharacterRight,
+        Enum.PlayerActions.CharacterJump
+    )
+end
+
+local function UnblockPlayerControls()
+    pcall(function()
+        ContextActionService:UnbindAction("NugHub_BlockMove")
+    end)
+end
+
+local function getAimbotTargetPart(character)
+    if not character then return nil end
+    if Config.Aimbot.TargetPart == "Head" then return character:FindFirstChild("Head")
+    elseif Config.Aimbot.TargetPart == "Torso" then
+        return character:FindFirstChild("UpperTorso") or character:FindFirstChild("LowerTorso")
+            or character:FindFirstChild("Torso") or character:FindFirstChild("HumanoidRootPart")
+    end
+    return character:FindFirstChild(Config.Aimbot.TargetPart)
+end
+
+local function isTeammateOf(player, checkEnabled)
+    if not checkEnabled then return false end
+    if player == LocalPlayer then return false end
+    local lt, pt = LocalPlayer.Team, player.Team
+    if not lt or not pt then return false end
+    return lt == pt
+end
+
+local function isVisible(targetPart)
+    if not targetPart then return false end
+    local origin    = Camera.CFrame.Position
+    local targetPos = targetPart.Position
+    local excluded  = { LocalPlayer.Character, targetPart.Parent }
+    for _ = 1, 3 do
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = excluded
+        rp.IgnoreWater = true
+        local result = workspace:Raycast(origin, targetPos - origin, rp)
+        if not result then return true end
+        local hit = result.Instance
+        if hit.Transparency >= 0.8 or not hit.CanCollide then table.insert(excluded, hit)
+        else return false end
+    end
+    return false
+end
+
+local function getScreenInfo(targetPart)
+    if not targetPart then return nil end
+    local pos, on = Camera:WorldToViewportPoint(targetPart.Position)
+    if not on or pos.Z <= 0 then return nil end
+    return Vector2.new(pos.X, pos.Y)
+end
+
+local function getPredictedPosition(part, myPos)
+    if not Config.Aimbot.PredictionEnabled then return part.Position end
+    if not part then return nil end
+    local char = part.Parent
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return part.Position end
+    local vel = root.AssemblyLinearVelocity
+    if vel.Magnitude < 1 then return part.Position end
+    local dist = (part.Position - myPos).Magnitude
+    local bulletSpeed = math.max(Config.Aimbot.BulletSpeed, 1)
+    return part.Position + (vel * (dist / bulletSpeed) * Config.Aimbot.PredictionMultiplier)
+end
+
+local function makeDraggable(frame, dragArea)
+    local dragging, dragStart, startPos = false, nil, nil
+    dragArea.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, input.Position, frame.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end)
+end
+
+local function isHeldKey(input)
+    local key = Config.Aimbot.HotkeyKey
+    if key == "MouseButton2" then return input.UserInputType == Enum.UserInputType.MouseButton2
+    elseif key == "MouseButton1" then return input.UserInputType == Enum.UserInputType.MouseButton1
+    elseif key == "E" then return input.KeyCode == Enum.KeyCode.E
+    elseif key == "Q" then return input.KeyCode == Enum.KeyCode.Q
+    elseif key == "Shift" then return input.KeyCode == Enum.KeyCode.LeftShift end
+    return false
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if isHeldKey(input) then aimbotHolding = true end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if isHeldKey(input) then aimbotHolding = false end
+end)
+
+WindUI:AddTheme({
+    Name = "Dark", Accent = Color3.fromHex("#18181b"), Background = Color3.fromHex("#101010"),
+    Outline = Color3.fromHex("#FFFFFF"), Text = Color3.fromHex("#FFFFFF"),
+    Placeholder = Color3.fromHex("#7a7a7a"), Button = Color3.fromHex("#52525b"), Icon = Color3.fromHex("#a1a1aa"),
+})
+
+local Window = WindUI:CreateWindow({
+    Title = "Nug hub I Sintonia Rp",
+    Author = "By Yuri_Ty",
+    Folder = "nughub", Icon = "crosshair",
+    Theme = "Dark", Acrylic = true, Transparent = true,
+    Background = "https://discordapp.com&",
+    Size = UDim2.fromOffset(680, 640), MinSize = Vector2.new(520, 480), MaxSize = Vector2.new(1100, 900),
+    ToggleKey = Enum.KeyCode.RightShift, Resizable = true, AutoScale = true, NewElements = true,
+    BackgroundImageTransparency = 0.65, HideSearchBar = false, ScrollBarEnabled = false, SideBarWidth = 200,
+    Topbar = { Height = 44, ButtonsType = "Default" },
+    OpenButton = {
+        Title = "Nug Hub", Icon = "zap", CornerRadius = UDim.new(1, 0), StrokeThickness = 3,
+        Enabled = true, Draggable = true, OnlyMobile = false, Scale = 1,
+        Color = ColorSequence.new(Color3.fromHex("#000000"), Color3.fromHex("#000000")),
+    },
+    User = { Enabled = true, Anonymous = false, Callback = function() end },
+})
+
+local MainTab = Window:Tab({ Title = "Main", Icon = "house" })
+local EspTab = Window:Tab({ Title = "Esp", Icon = "eye" })
+local CombatTab = Window:Tab({ Title = "Combate", Icon = "crosshair" })
+local SettingsTab = Window:Tab({ Title = "Configurações", Icon = "settings" })
+
+-- ABA ESP
+local ESPDistSection = EspTab:Section({ Title = "Distância ESP", Icon = "ruler" })
+UI.ESPDistance = ESPDistSection:Slider({
+    Title = "Distância Máxima (studs)",
+    Desc = "Distância máxima para mostrar o destaque nos jogadores.",
+    Icon = "arrow-up-down", Value = { Min = 0, Max = 1500, Default = 1000 }, Step = 10,
+    Callback = function(v) Config.ESP.MaxDistance = math.max(100, math.floor(v + 0.5)) end,
+})
+
+local ESPWallsSection = EspTab:Section({ Title = "Paredes", Icon = "wall" })
+UI.ESPThroughWalls = ESPWallsSection:Toggle({
+    Title = "Atravessar Paredes",
+    Desc = "Ativado: mostra os jogadores mesmo quando estão atrás de paredes.",
+    Icon = "eye-off", Value = false, Callback = function(s) Config.ESP.ThroughWalls = s end,
+})
+
+local ESPTeamSection = EspTab:Section({ Title = "Filtrar por Time", Icon = "users" })
+UI.ESPTeamCheck = ESPTeamSection:Toggle({
+    Title = "Ignorar meu Time",
+    Desc = "Ativado: não mostra os jogadores do seu próprio time.",
+    Icon = "users", Value = false, Callback = function(s) Config.ESP.TeamCheck = s end,
+})
+
+local ESPInfoSection = EspTab:Section({ Title = "Nome & Distância", Icon = "type" })
+UI.ESPShowName = ESPInfoSection:Toggle({
+    Title = "Mostrar Nome",
+    Desc = "Exibe o nome do jogador acima do destaque.",
+    Icon = "user", Value = false, Callback = function(s) Config.ESP.ShowName = s end,
+})
+UI.ESPShowDistance = ESPInfoSection:Toggle({
+    Title = "Mostrar Distância",
+    Desc = "Exibe a distância até o jogador acima do destaque.",
+    Icon = "ruler", Value = false, Callback = function(s) Config.ESP.ShowDistance = s end,
+})
+UI.ESPTextHeight = ESPInfoSection:Slider({
+    Title = "Altura do Texto (px)",
+    Desc = "Distância em pixels que o texto fica acima da caixa do jogador.",
+    Icon = "arrow-up", Value = { Min = 0, Max = 100, Default = 18 }, Step = 1,
+    Callback = function(v) Config.ESP.TextHeightOffset = math.floor(v + 0.5) end,
+})
+
+local ESPHighlightSection = EspTab:Section({ Title = "ESP Destaque", Icon = "highlighter" })
+UI.ESPHighlight = ESPHighlightSection:Toggle({
+    Title = "Ativar Destaque",
+    Desc = "Realça o jogador com um preenchimento e contorno colorido.",
+    Icon = "highlighter", Value = false, Callback = function(s) Config.ESP.Highlight = s end,
+})
+UI.ESPHighlightColor = ESPHighlightSection:Colorpicker({
+    Title = "Cor do Destaque",
+    Desc = "Escolha a cor do realce.",
+    Default = Config.ESP.HighlightColor, Callback = function(c) Config.ESP.HighlightColor = c end,
+})
+UI.ESPHighlightIntensity = ESPHighlightSection:Slider({
+    Title = "Intensidade do Preenchimento",
+    Desc = "Quanto mais alto, mais forte e visível fica o preenchimento.",
+    Icon = "sun", Value = { Min = 0.1, Max = 1.0, Default = 0.5 }, Rounding = 2,
+    Callback = function(v) Config.ESP.HighlightIntensity = v end,
+})
+UI.ESPHighlightThickness = ESPHighlightSection:Slider({
+    Title = "Espessura do Contorno",
+    Desc = "Quanto mais alto, mais grosso fica o contorno do destaque.",
+    Icon = "maximize", Value = { Min = 1, Max = 10, Default = 5 }, Step = 1,
+    Callback = function(v) Config.ESP.HighlightThickness = v end,
+})
+
+local ESPBoxSection = EspTab:Section({ Title = "Caixa do ESP", Icon = "box" })
+UI.ESPBox = ESPBoxSection:Toggle({
+    Title = "Ativar Caixa",
+    Desc = "Desenha uma caixa ao redor do jogador.",
+    Icon = "box", Value = false, Callback = function(s) Config.ESP.Box = s end,
+})
+UI.ESPBoxColor = ESPBoxSection:Colorpicker({
+    Title = "Cor da Caixa",
+    Desc = "Escolha a cor da caixa.",
+    Default = Config.ESP.BoxColor, Callback = function(c) Config.ESP.BoxColor = c end,
+})
+
+local ESPLinesSection = EspTab:Section({ Title = "Linhas do ESP", Icon = "line-chart" })
+UI.ESPLines = ESPLinesSection:Toggle({
+    Title = "Ativar Linhas",
+    Desc = "Desenha uma linha da sua tela até o jogador.",
+    Icon = "line-chart", Value = false, Callback = function(s) Config.ESP.Lines = s end,
+})
+UI.ESPLinesColor = ESPLinesSection:Colorpicker({
+    Title = "Cor das Linhas",
+    Desc = "Escolha a cor das linhas.",
+    Default = Config.ESP.LinesColor, Callback = function(c) Config.ESP.LinesColor = c end,
+})
+
+local ESPHealthSection = EspTab:Section({ Title = "Vida do ESP", Icon = "heart" })
+UI.ESPHealth = ESPHealthSection:Toggle({
+    Title = "Mostrar Vida",
+    Desc = "Mostra a barra de vida do jogador.",
+    Icon = "heart", Value = false, Callback = function(s) Config.ESP.Health = s end,
+})
+
+-- ABA COMBATE
+local CombatSection = CombatTab:Section({ Title = "Controle", Icon = "power" })
+local aimbotToggle = CombatSection:Toggle({
+    Title = "Aimbot",
+    Desc = "Abre o painel do Aimbot.",
+    Icon = "toggle-left", Value = false,
+    Callback = function(state)
+        Config.Aimbot.ShowPanel = state
+        if state then createAimbotFloatingWindow()
+        else Config.Aimbot.Enabled = false; destroyAimbotFloatingWindow() end
+    end,
+})
+UI.TeamCheckAim = CombatSection:Toggle({
+    Title = "Ignorar meu Time",
+    Desc = "Ativado: não mira em jogadores do seu próprio time.",
+    Icon = "users", Value = false, Callback = function(s) Config.Aimbot.TeamCheck = s end,
+})
+UI.ChecarParedes = CombatSection:Toggle({
+    Title = "Checar Paredes",
+    Desc = "Ativado: a mira não trava em jogadores atrás de paredes.",
+    Icon = "eye", Value = true, Callback = function(s) Config.Aimbot.VisibleOnly = s end,
+})
+
+local AimbotConfigSection = CombatTab:Section({ Title = "Configurações da Mira", Icon = "crosshair" })
+UI.AimbotPart = AimbotConfigSection:Dropdown({
+    Title = "Parte Alvo",
+    Desc = "Parte do corpo onde a mira vai travar.",
+    Icon = "crosshair", Values = { "Head", "Torso" }, Value = "Head",
+    Callback = function(opt) Config.Aimbot.TargetPart = opt end,
+})
+UI.AimbotSens = AimbotConfigSection:Slider({
+    Title = "Sensibilidade",
+    Desc = "Velocidade com que a mira se move até o alvo.",
+    Icon = "move", Value = { Min = 0.1, Max = 1.0, Default = 0.5 }, Rounding = 2,
+    Callback = function(v) Config.Aimbot.Sensitivity = v end,
+})
+UI.AimbotStrength = AimbotConfigSection:Slider({
+    Title = "Força",
+    Desc = "Intensidade da puxada da mira.",
+    Icon = "zap", Value = { Min = 0.1, Max = 1.0, Default = 0.8 }, Rounding = 2,
+    Callback = function(v) Config.Aimbot.Strength = v end,
+})
+UI.AimbotDistance = AimbotConfigSection:Slider({
+    Title = "Distância Máxima",
+    Desc = "Distância máxima que o aimbot pode travar.",
+    Icon = "ruler", Value = { Min = 0, Max = 1500, Default = 500 }, Step = 10,
+    Callback = function(v) Config.Aimbot.MaxDistance = math.max(50, math.floor(v + 0.5)) end,
+})
+UI.AimbotLimitDist = AimbotConfigSection:Toggle({
+    Title = "Limitar à Distância",
+    Desc = "Ativado: para de mirar se o alvo sair do limite de distância.",
+    Icon = "toggle-left", Value = true, Callback = function(s) Config.Aimbot.LimitToDistance = s end,
+})
+UI.AimbotNoFocus = AimbotConfigSection:Toggle({
+    Title = "Trocar de Alvo Automático",
+    Desc = "Ativado: troca de alvo automaticamente quando outro jogador aparece na tela.",
+    Icon = "shuffle", Value = false,
+    Callback = function(s) Config.Aimbot.Unfocused = s; Config.Aimbot.LockedTarget = nil end,
+})
+
+local HotkeySection = CombatTab:Section({ Title = "Atalho", Icon = "keyboard" })
+UI.HotkeyEnabled = HotkeySection:Toggle({
+    Title = "Ativar Atalho",
+    Desc = "Apenas para PC/Emulador. Ativado: a mira só funciona enquanto você segura o botão escolhido.",
+    Icon = "keyboard", Value = false, Callback = function(s) Config.Aimbot.HotkeyEnabled = s end,
+})
+UI.HotkeyKey = HotkeySection:Dropdown({
+    Title = "Botão de Ativação",
+    Desc = "Apenas para PC/Emulador. Botão que precisa ser segurado.",
+    Icon = "key", Values = { "MouseButton2", "MouseButton1", "E", "Q", "Shift" }, Value = "MouseButton2",
+    Callback = function(v) Config.Aimbot.HotkeyKey = v; aimbotHolding = false end,
+})
+
+local PredSection = CombatTab:Section({ Title = "Predição (Lead)", Icon = "trending-up" })
+UI.PredictionEnabled = PredSection:Toggle({
+    Title = "Ativar Predição",
+    Desc = "Mira na posição futura do alvo (útil em jogos com bala física).",
+    Icon = "trending-up", Value = false, Callback = function(s) Config.Aimbot.PredictionEnabled = s end,
+})
+UI.PredictionBulletSpeed = PredSection:Slider({
+    Title = "Velocidade da Bala",
+    Desc = "Velocidade do projétil da sua arma.",
+    Icon = "zap", Value = { Min = 100, Max = 3000, Default = 500 }, Step = 10,
+    Callback = function(v) Config.Aimbot.BulletSpeed = math.max(50, math.floor(v + 0.5)) end,
+})
+UI.PredictionMultiplier = PredSection:Slider({
+    Title = "Multiplicador",
+    Desc = "Ajuste fino da predição. 1.0 = padrão.",
+    Icon = "sliders", Value = { Min = 0.5, Max = 2.0, Default = 1.0 }, Rounding = 2,
+    Callback = function(v) Config.Aimbot.PredictionMultiplier = v end,
+})
+
+local FOVSection = CombatTab:Section({ Title = "Círculo de Mira", Icon = "circle" })
+UI.AimbotFOV = FOVSection:Slider({
+    Title = "Tamanho do Círculo",
+    Desc = "Raio do círculo onde a mira detecta alvos.",
+    Icon = "circle", Value = { Min = 50, Max = 1000, Default = 150 }, Step = 10,
+    Callback = function(v) Config.Aimbot.FOV = math.floor(v + 0.5) end,
+})
+UI.AimbotShowFOV = FOVSection:Toggle({
+    Title = "Mostrar Círculo",
+    Desc = "Exibe o círculo visual no centro da tela.",
+    Icon = "eye", Value = false, Callback = function(s) Config.Aimbot.ShowFOV = s end,
+})
+UI.FOVAffectsAim = FOVSection:Toggle({
+    Title = "Círculo Afeta a Mira",
+    Desc = "Ativado: a mira só pega alvos dentro do círculo.",
+    Icon = "target", Value = false, Callback = function(s) Config.Aimbot.FOVAffectsAim = s end,
+})
+UI.AimbotFOVThick = FOVSection:Slider({
+    Title = "Espessura do Círculo",
+    Desc = "Quão grossa é a linha do círculo.",
+    Icon = "minus", Value = { Min = 1, Max = 5, Default = 1 }, Step = 1,
+    Callback = function(v) Config.Aimbot.FOVThickness = math.floor(v + 0.5) end,
+})
+UI.AimbotFOVTransp = FOVSection:Slider({
+    Title = "Transparência do Círculo",
+    Desc = "0.1 = quase invisível, 1.0 = totalmente visível.",
+    Icon = "droplet", Value = { Min = 0.1, Max = 1.0, Default = 0.65 }, Rounding = 2,
+    Callback = function(v) Config.Aimbot.FOVTransparency = v end,
+})
+
+-- ABA CONFIGURAÇÕES
+local StretchSection = SettingsTab:Section({ Title = "Tela Esticada", Icon = "maximize" })
+StretchSection:Toggle({
+    Title = "Ativar Tela Esticada",
+    Desc = "Deixa o campo de visão mais esticado.",
+    Icon = "maximize", Value = false,
+    Callback = function(state) stretchEnabled = state Camera.FieldOfView = stretchEnabled and stretchFOV or originalFOV end,
+})
+StretchSection:Slider({
+    Title = "Nível de Esticamento",
+    Desc = "Menor = mais esticado, Maior = mais estreito.",
+    Icon = "move-horizontal", Value = { Min = 50, Max = 130, Default = 70 }, Step = 1,
+    Callback = function(v) stretchFOV = v if stretchEnabled then Camera.FieldOfView = v end end,
+})
+StretchSection:Button({
+    Title = "Resetar Tela",
+    Desc = "Volta ao campo de visão original.",
+    Icon = "rotate-ccw",
+    Callback = function() stretchEnabled = false stretchFOV = 70 Camera.FieldOfView = originalFOV end,
+})
+LocalPlayer.CharacterAdded:Connect(function() task.wait(0.5) if stretchEnabled then Camera.FieldOfView = stretchFOV end end)
+
+-- POWER
+local PowerUI = { Gui = nil, Open = false, Minimized = false, ToggleBtn = nil, ToggleLabel = nil, ValueLabel = nil }
+local function GetSpeedFromLevel(level) return ({25, 35, 50, 70, 100})[level] or 25 end
+
+RunService.RenderStepped:Connect(function()
+    if not Config.Swift.Enabled or not Config.Swift.Holding then return end
+    local char = LocalPlayer.Character if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not humanoid or humanoid.MoveDirection.Magnitude <= 0 then return end
+    local speed = GetSpeedFromLevel(Config.Swift.Level)
+    local studsPerFrame = speed / 60
+    local moveVector = Vector3.new(humanoid.MoveDirection.X, 0, humanoid.MoveDirection.Z).Unit * studsPerFrame
+    hrp.CFrame = hrp.CFrame + moveVector
+end)
+
+local function SyncSwiftUI()
+    if PowerUI.ToggleLabel then
+        PowerUI.ToggleLabel.Text = Config.Swift.Enabled and "ON" or "OFF"
+        PowerUI.ToggleBtn.BackgroundColor3 = Config.Swift.Enabled and Color3.fromRGB(30, 150, 30) or Color3.fromRGB(60, 10, 10)
+    end
+    if PowerUI.ValueLabel then PowerUI.ValueLabel.Text = tostring(Config.Swift.Level) end
+end
+
+local function CreateSwiftUI()
+    if PowerUI.Gui then return PowerUI.Gui end
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "PowerUI_" .. tostring(math.random(100000, 999999))
+    gui.ResetOnSpawn = false gui.IgnoreGuiInset = true gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling gui.DisplayOrder = 1000 gui.Enabled = false
+    pcall(function() gui.Parent = CoreGui end)
+    if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+    local main = Instance.new("Frame")
+    main.Size = UDim2.new(0, 210, 0, 145) main.Position = UDim2.new(0.15, 0, 0.5, 0)
+    main.BackgroundColor3 = Color3.fromRGB(12, 12, 14) main.BorderSizePixel = 0 main.Active = true main.Parent = gui
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", main) stroke.Color = Color3.fromRGB(60, 150, 255) stroke.Thickness = 1.5 stroke.Transparency = 0.3
+
+    local dragBar = Instance.new("TextLabel")
+    dragBar.Size = UDim2.new(1, 0, 0, 24) dragBar.BackgroundColor3 = Color3.fromRGB(15, 20, 35) dragBar.BorderSizePixel = 0
+    dragBar.Text = "⚡ POWER" dragBar.TextColor3 = Color3.fromRGB(100, 180, 255) dragBar.TextSize = 11 dragBar.Font = Enum.Font.GothamBold dragBar.Parent = main
+    Instance.new("UICorner", dragBar).CornerRadius = UDim.new(0, 8)
+    local dbFix = Instance.new("Frame", dragBar) dbFix.Size = UDim2.new(1, 0, 0, 8) dbFix.Position = UDim2.new(0, 0, 1, -8) dbFix.BackgroundColor3 = Color3.fromRGB(15, 20, 35) dbFix.BorderSizePixel = 0
+
+    local content = Instance.new("Frame")
+    content.Size = UDim2.new(1, 0, 1, -24) content.Position = UDim2.new(0, 0, 0, 24) content.BackgroundTransparency = 1 content.Parent = main
+
+    local minBtn = Instance.new("TextButton") minBtn.Size = UDim2.new(0, 20, 0, 20) minBtn.Position = UDim2.new(1, -26, 0, 2)
+    minBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50) minBtn.BorderSizePixel = 0 minBtn.Text = "−" minBtn.TextColor3 = Color3.fromRGB(200, 200, 200) minBtn.Font = Enum.Font.GothamBold minBtn.TextSize = 16 minBtn.Parent = dragBar
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+    minBtn.MouseButton1Click:Connect(function()
+        PowerUI.Minimized = not PowerUI.Minimized
+        content.Visible = not PowerUI.Minimized
+        main.Size = PowerUI.Minimized and UDim2.new(0, 210, 0, 24) or UDim2.new(0, 210, 0, 145)
+        minBtn.Text = PowerUI.Minimized and "+" or "−"
+    end)
+
+    local toggleBtn = Instance.new("TextButton") toggleBtn.Size = UDim2.new(0, 90, 0, 24) toggleBtn.Position = UDim2.new(0, 8, 0, 6)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(60, 10, 10) toggleBtn.BorderSizePixel = 0 toggleBtn.Text = "" toggleBtn.Parent = content
+    Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 5)
+    local toggleLabel = Instance.new("TextLabel") toggleLabel.Size = UDim2.new(1, 0, 1, 0) toggleLabel.BackgroundTransparency = 1 toggleLabel.Text = "OFF" toggleLabel.TextColor3 = Color3.fromRGB(255, 255, 255) toggleLabel.TextSize = 12 toggleLabel.Font = Enum.Font.GothamBold toggleLabel.Parent = toggleBtn
+
+    local holdBtn = Instance.new("TextButton") holdBtn.Size = UDim2.new(0, 90, 0, 24) holdBtn.Position = UDim2.new(1, -98, 0, 6)
+    holdBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 200) holdBtn.BorderSizePixel = 0 holdBtn.Text = "" holdBtn.Parent = content
+    Instance.new("UICorner", holdBtn).CornerRadius = UDim.new(0, 5)
+    local holdLabel = Instance.new("TextLabel") holdLabel.Size = UDim2.new(1, 0, 1, 0) holdLabel.BackgroundTransparency = 1 holdLabel.Text = "HOLD RUN" holdLabel.TextColor3 = Color3.fromRGB(255, 255, 255) holdLabel.TextSize = 10 holdLabel.Font = Enum.Font.GothamBold holdLabel.Parent = holdBtn
+
+    local ctrl = Instance.new("Frame") ctrl.Size = UDim2.new(1, -16, 0, 40) ctrl.Position = UDim2.new(0, 8, 0, 36)
+    ctrl.BackgroundColor3 = Color3.fromRGB(20, 20, 24) ctrl.BorderSizePixel = 0 ctrl.Parent = content
+    Instance.new("UICorner", ctrl).CornerRadius = UDim.new(0, 6)
+
+    local minusBtn = Instance.new("TextButton") minusBtn.Size = UDim2.new(0, 40, 1, -8) minusBtn.Position = UDim2.new(0, 4, 0, 4)
+    minusBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 40) minusBtn.BorderSizePixel = 0 minusBtn.Text = "−" minusBtn.TextColor3 = Color3.fromRGB(220, 220, 220) minusBtn.TextSize = 22 minusBtn.Font = Enum.Font.GothamBold minusBtn.Parent = ctrl
+    Instance.new("UICorner", minusBtn).CornerRadius = UDim.new(0, 5)
+    local valueLabel = Instance.new("TextLabel") valueLabel.Size = UDim2.new(0, 60, 1, 0) valueLabel.Position = UDim2.new(0.5, -30, 0, 0)
+    valueLabel.BackgroundTransparency = 1 valueLabel.Text = "1" valueLabel.TextColor3 = Color3.fromRGB(200, 200, 200) valueLabel.TextSize = 22 valueLabel.Font = Enum.Font.GothamBold valueLabel.Parent = ctrl
+    local plusBtn = Instance.new("TextButton") plusBtn.Size = UDim2.new(0, 40, 1, -8) plusBtn.Position = UDim2.new(1, -44, 0, 4)
+    plusBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 40) plusBtn.BorderSizePixel = 0 plusBtn.Text = "+" plusBtn.TextColor3 = Color3.fromRGB(220, 220, 220) plusBtn.TextSize = 22 plusBtn.Font = Enum.Font.GothamBold plusBtn.Parent = ctrl
+    Instance.new("UICorner", plusBtn).CornerRadius = UDim.new(0, 5)
+
+    PowerUI.ToggleBtn = toggleBtn PowerUI.ToggleLabel = toggleLabel PowerUI.ValueLabel = valueLabel
+
+    toggleBtn.MouseButton1Click:Connect(function() Config.Swift.Enabled = not Config.Swift.Enabled SyncSwiftUI() end)
+    minusBtn.MouseButton1Click:Connect(function() Config.Swift.Level = math.max(1, Config.Swift.Level - 1) SyncSwiftUI() end)
+    plusBtn.MouseButton1Click:Connect(function() Config.Swift.Level = math.min(5, Config.Swift.Level + 1) SyncSwiftUI() end)
+    holdBtn.MouseButton1Down:Connect(function() if Config.Swift.Enabled then Config.Swift.Holding = true holdBtn.BackgroundColor3 = Color3.fromRGB(60, 120, 230) end end)
+    holdBtn.MouseButton1Up:Connect(function() Config.Swift.Holding = false holdBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 200) end)
+    holdBtn.MouseLeave:Connect(function() if Config.Swift.Holding then Config.Swift.Holding = false holdBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 200) end end)
+
+    makeDraggable(main, dragBar)
+    PowerUI.Gui = gui SyncSwiftUI() return gui
+end
+
+-- STAFF PANEL
+local StaffDetector = { ScanInterval = 2 }
+local SUSPICIOUS_KEYWORDS = { "staff", "admin", "mod", "moderador", "moderator", "owner", "dono", "fundador", "founder", "gerente", "manager", "suporte", "support", "ceo", "dev", "developer", "gm", "supervisor", "coordenador", "helper", "moderacao", "moderação", "adm", "adml", "adms", "admins", "staffs", "staffteam" }
+local EXACT_WORDS = { ["staff"] = true, ["admin"] = true, ["mod"] = true, ["moderator"] = true, ["owner"] = true, ["adm"] = true, ["gm"] = true }
+
+local function GetTeamName(player)
+    local team = player.Team
+    if team then return team.Name end
+    local char = player.Character
+    if char then
+        local tv = char:FindFirstChild("Team") or char:FindFirstChild("TeamValue")
+        if tv then return tostring(tv.Value) end
+    end
+    return ""
+end
+
+local function HasSuspiciousName(name)
+    local ln = string.lower(name)
+    for word in string.gmatch(ln, "%a+") do if EXACT_WORDS[word] then return true, word end end
+    for _, kw in ipairs(SUSPICIOUS_KEYWORDS) do
+        if string.find(ln, "^" .. kw) or string.find(ln, kw .. "$") or string.find(ln, "%s" .. kw .. "%s") then return true, kw end
+    end
+    return false, nil
+end
+
+local function AnalyzePlayer(p)
+    if p == LocalPlayer then return nil end
+    local reasons, score = {}, 0
+    local h1, k1 = HasSuspiciousName(p.Name)
+    if h1 then score = score + 5; table.insert(reasons, "Palavra no nome: '" .. k1 .. "'") end
+    local h2, k2 = HasSuspiciousName(p.DisplayName)
+    if h2 then score = score + 5; table.insert(reasons, "Palavra no DisplayName: '" .. k2 .. "'") end
+    if p.Team then
+        local tn = string.lower(p.Team.Name)
+        for word in string.gmatch(tn, "%a+") do
+            if EXACT_WORDS[word] then score = score + 8; table.insert(reasons, "Time: '" .. p.Team.Name .. "'"); break end
+        end
+    end
+    if p.Character then
+        local hum = p.Character:FindFirstChildOfClass("Humanoid")
+        if hum and hum.WalkSpeed > 100 then score = score + 4; table.insert(reasons, "Speed: " .. hum.WalkSpeed) end
+    end
+    if score < 10 then return nil end
+    local risk = "low"
+    if score >= 20 then risk = "high" elseif score >= 13 then risk = "medium" end
+    return { player = p, score = score, risk = risk, reasons = reasons, team = GetTeamName(p), displayName = p.DisplayName, username = p.Name, userId = p.UserId }
+end
+
+local StaffPanel = { Open = false, Gui = nil, ListFrame = nil, TitleLabel = nil, StatusLabel = nil, Minimized = false }
+
+local function CreateStaffPanel()
+    if StaffPanel.Gui then return StaffPanel.Gui end
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "StaffPanel_" .. tostring(math.random(100000, 999999))
+    gui.ResetOnSpawn = false gui.IgnoreGuiInset = true gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling gui.DisplayOrder = 999 gui.Enabled = false
+    pcall(function() gui.Parent = CoreGui end)
+    if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+    local main = Instance.new("Frame")
+    main.Size = UDim2.new(0, 220, 0, 240) main.Position = UDim2.new(0.5, -110, 0.5, -120)
+    main.BackgroundColor3 = Color3.fromRGB(12, 12, 14) main.BorderSizePixel = 0 main.Active = true main.Parent = gui
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", main) stroke.Color = Color3.fromRGB(255, 50, 50) stroke.Thickness = 1.5 stroke.Transparency = 0.3
+
+    local topbar = Instance.new("Frame")
+    topbar.Size = UDim2.new(1, 0, 0, 26) topbar.BackgroundColor3 = Color3.fromRGB(28, 8, 8) topbar.BorderSizePixel = 0 topbar.Active = true topbar.Parent = main
+    Instance.new("UICorner", topbar).CornerRadius = UDim.new(0, 8)
+    local tf = Instance.new("Frame", topbar) tf.Size = UDim2.new(1, 0, 0, 8) tf.Position = UDim2.new(0, 0, 1, -8) tf.BackgroundColor3 = Color3.fromRGB(28, 8, 8) tf.BorderSizePixel = 0
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -70, 1, 0) title.Position = UDim2.new(0, 8, 0, 0) title.BackgroundTransparency = 1
+    title.Text = "🛡️ Staff: 0" title.TextColor3 = Color3.fromRGB(255, 80, 80) title.TextSize = 12 title.Font = Enum.Font.GothamBold title.TextXAlignment = Enum.TextXAlignment.Left title.Parent = topbar
+    StaffPanel.TitleLabel = title
+
+    local content = Instance.new("Frame")
+    content.Size = UDim2.new(1, 0, 1, -26) content.Position = UDim2.new(0, 0, 0, 26) content.BackgroundTransparency = 1 content.Parent = main
+
+    local minBtn = Instance.new("TextButton") minBtn.Size = UDim2.new(0, 20, 0, 20) minBtn.Position = UDim2.new(1, -50, 0, 3)
+    minBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50) minBtn.BorderSizePixel = 0 minBtn.Text = "−" minBtn.TextColor3 = Color3.fromRGB(200, 200, 200) minBtn.Font = Enum.Font.GothamBold minBtn.TextSize = 16 minBtn.Parent = topbar
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+    minBtn.MouseButton1Click:Connect(function()
+        StaffPanel.Minimized = not StaffPanel.Minimized
+        content.Visible = not StaffPanel.Minimized
+        main.Size = StaffPanel.Minimized and UDim2.new(0, 220, 0, 26) or UDim2.new(0, 220, 0, 240)
+        minBtn.Text = StaffPanel.Minimized and "+" or "−"
+    end)
+
+    local closeBtn = Instance.new("TextButton") closeBtn.Size = UDim2.new(0, 20, 0, 20) closeBtn.Position = UDim2.new(1, -24, 0, 3)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 40, 40) closeBtn.BorderSizePixel = 0 closeBtn.Text = "X" closeBtn.TextColor3 = Color3.fromRGB(255,255,255) closeBtn.TextSize = 11 closeBtn.Font = Enum.Font.GothamBold closeBtn.Parent = topbar
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
+    closeBtn.MouseButton1Click:Connect(function() gui.Enabled = false StaffPanel.Open = false end)
+
+    local status = Instance.new("TextLabel") status.Size = UDim2.new(1, -14, 0, 14) status.Position = UDim2.new(0, 7, 0, 4)
+    status.BackgroundTransparency = 1 status.Text = "Escaneando..." status.TextColor3 = Color3.fromRGB(180, 180, 180) status.TextSize = 9 status.Font = Enum.Font.Gotham status.TextXAlignment = Enum.TextXAlignment.Left status.Parent = content
+    StaffPanel.StatusLabel = status
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -14, 1, -24) scroll.Position = UDim2.new(0, 7, 0, 20)
+    scroll.BackgroundTransparency = 1 scroll.BorderSizePixel = 0 scroll.ScrollBarThickness = 3 scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 80, 80)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0) scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y scroll.Parent = content
+    local ll = Instance.new("UIListLayout", scroll) ll.SortOrder = Enum.SortOrder.LayoutOrder ll.Padding = UDim.new(0, 3)
+    StaffPanel.ListFrame = scroll
+
+    makeDraggable(main, topbar)
+    StaffPanel.Gui = gui
+    return gui
+end
+
+local function RenderStaffList(detectedList)
+    if not StaffPanel.ListFrame then return end
+    for _, child in ipairs(StaffPanel.ListFrame:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
+    end
+    if #detectedList == 0 then
+        local empty = Instance.new("TextLabel") empty.Size = UDim2.new(1, -6, 0, 24) empty.BackgroundTransparency = 1
+        empty.Text = "✅ Nenhum staff detectado" empty.TextColor3 = Color3.fromRGB(100, 255, 100) empty.TextSize = 10 empty.Font = Enum.Font.Gotham
+        empty.Parent = StaffPanel.ListFrame
+        return
+    end
+    for _, data in ipairs(detectedList) do
+        local card = Instance.new("Frame") card.Size = UDim2.new(1, -4, 0, 52)
+        card.BackgroundColor3 = Color3.fromRGB(25, 25, 30) card.BorderSizePixel = 0 card.Parent = StaffPanel.ListFrame
+        Instance.new("UICorner", card).CornerRadius = UDim.new(0, 5)
+        local riskColor = Color3.fromRGB(255, 255, 100)
+        if data.risk == "high" then riskColor = Color3.fromRGB(255, 50, 50)
+        elseif data.risk == "medium" then riskColor = Color3.fromRGB(255, 180, 0) end
+        local cs = Instance.new("UIStroke", card) cs.Color = riskColor cs.Thickness = 1 cs.Transparency = 0.4
+
+        local avatar = Instance.new("ImageLabel") avatar.Size = UDim2.new(0, 28, 0, 28) avatar.Position = UDim2.new(0, 5, 0, 5)
+        avatar.BackgroundColor3 = Color3.fromRGB(40, 40, 45) avatar.BorderSizePixel = 0
+        avatar.Image = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. tostring(data.userId) .. "&width=150&height=150&format=png"
+        avatar.Parent = card
+        Instance.new("UICorner", avatar).CornerRadius = UDim.new(1, 0)
+
+        local nameLabel = Instance.new("TextLabel") nameLabel.Size = UDim2.new(1, -70, 0, 12) nameLabel.Position = UDim2.new(0, 38, 0, 5)
+        nameLabel.BackgroundTransparency = 1 nameLabel.Text = data.displayName nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        nameLabel.TextSize = 9 nameLabel.Font = Enum.Font.GothamBold nameLabel.TextXAlignment = Enum.TextXAlignment.Left nameLabel.TextTruncate = Enum.TextTruncate.AtEnd nameLabel.Parent = card
+
+        local riskLabel = Instance.new("TextLabel") riskLabel.Size = UDim2.new(0, 38, 0, 11) riskLabel.Position = UDim2.new(1, -43, 0, 6)
+        riskLabel.BackgroundColor3 = riskColor riskLabel.BorderSizePixel = 0 riskLabel.Text = string.upper(data.risk)
+        riskLabel.TextColor3 = Color3.fromRGB(0, 0, 0) riskLabel.TextSize = 7 riskLabel.Font = Enum.Font.GothamBold riskLabel.Parent = card
+        Instance.new("UICorner", riskLabel).CornerRadius = UDim.new(0, 3)
+
+        local teamLabel = Instance.new("TextLabel") teamLabel.Size = UDim2.new(1, -44, 0, 10) teamLabel.Position = UDim2.new(0, 38, 0, 19)
+        teamLabel.BackgroundTransparency = 1 teamLabel.Text = "Time: " .. (data.team ~= "" and data.team or "N/A")
+        teamLabel.TextColor3 = Color3.fromRGB(180, 180, 180) teamLabel.TextSize = 8 teamLabel.Font = Enum.Font.Gotham teamLabel.TextXAlignment = Enum.TextXAlignment.Left teamLabel.Parent = card
+
+        local reasonsLabel = Instance.new("TextLabel") reasonsLabel.Size = UDim2.new(1, -10, 0, 18) reasonsLabel.Position = UDim2.new(0, 5, 0, 30)
+        reasonsLabel.BackgroundTransparency = 1 reasonsLabel.Text = "⚠ " .. table.concat(data.reasons, " • ")
+        reasonsLabel.TextColor3 = Color3.fromRGB(255, 200, 100) reasonsLabel.TextSize = 7 reasonsLabel.Font = Enum.Font.Gotham
+        reasonsLabel.TextXAlignment = Enum.TextXAlignment.Left reasonsLabel.TextWrapped = true reasonsLabel.TextYAlignment = Enum.TextYAlignment.Top reasonsLabel.Parent = card
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(StaffDetector.ScanInterval)
+        pcall(function()
+            local detected = {}
+            for _, player in ipairs(Players:GetPlayers()) do
+                local r = AnalyzePlayer(player)
+                if r then table.insert(detected, r) end
+            end
+            table.sort(detected, function(a, b) return a.score > b.score end)
+            if StaffPanel.TitleLabel then StaffPanel.TitleLabel.Text = "🛡️ Staff: " .. tostring(#detected) end
+            if StaffPanel.StatusLabel then
+                if #detected > 0 then
+                    local hc = 0
+                    for _, d in ipairs(detected) do if d.risk == "high" then hc = hc + 1 end end
+                    StaffPanel.StatusLabel.Text = string.format("⚠ %d staff • %d ALTO", #detected, hc)
+                    StaffPanel.StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                else
+                    StaffPanel.StatusLabel.Text = "✅ Nenhum staff"
+                    StaffPanel.StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                end
+            end
+            RenderStaffList(detected)
+        end)
+    end
+end)
+
+-- ============================================
+-- AUTO COLETA DE LIXO (CORRIGIDO)
+-- ============================================
+local LIXO_POSITIONS = {
+    Vector3.new(-1239.9, 129.4, -5179.5),
+    Vector3.new(-1253.1, 129.4, -5173.8),
+    Vector3.new(-1264.7, 129.4, -5169.7),
+    Vector3.new(-1301.9, 129.4, -5168.6),
+    Vector3.new(-1306.9, 129.4, -5199.6),
+    Vector3.new(-1342.6, 129.4, -5177.2),
+    Vector3.new(-1343.0, 129.4, -5137.0),
+    Vector3.new(-1244.4, 129.4, -5123.2),
+    Vector3.new(-1224.1, 129.4, -5125.1),
+    Vector3.new(-1218.4, 129.4, -5138.0),
+    Vector3.new(-1221.0, 129.4, -5163.1),
+}
+local DELIVERY_POSITION = Vector3.new(-1285.7, 129.4, -5131.8)
+local COLLECT_WAIT = 2.5
+local DELIVER_WAIT = 3.0
+
+local LixoIgnored = {}
+local CurrentLixoIndex = nil
+local LixoStatusRefs = { StatusLabel = nil, CountLabel = nil, ProgressFill = nil, NextButton = nil }
+
+local function LixoUpdateStatus(text)
+    if LixoStatusRefs.StatusLabel then pcall(function() LixoStatusRefs.StatusLabel.Text = text end) end
+    if LixoStatusRefs.CountLabel then pcall(function() LixoStatusRefs.CountLabel.Text = string.format("%d / %d", Config.Lixo.Coletados, Config.Lixo.MaxColetas) end) end
+    if LixoStatusRefs.ProgressFill then
+        local pct = math.clamp(Config.Lixo.Coletados / math.max(Config.Lixo.MaxColetas, 1), 0, 1)
+        pcall(function()
+            LixoStatusRefs.ProgressFill.Size = UDim2.new(pct, 0, 1, 0)
+            if pct >= 1 then LixoStatusRefs.ProgressFill.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+            else LixoStatusRefs.ProgressFill.BackgroundColor3 = Color3.fromRGB(50, 220, 50) end
+        end)
+    end
+end
+
+local function LixoIsPathClear(fromPos, toPos)
+    if not Config.Lixo.CheckWall then return true end
+    local char = LocalPlayer.Character if not char then return false end
+    local direction = toPos - fromPos
+    if direction.Magnitude <= 0 then return true end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = {char, Camera}
+    rp.IgnoreWater = true
+    local result = workspace:Raycast(fromPos, direction.Unit * direction.Magnitude, rp)
+    if result and result.Instance.Transparency < 0.5 and result.Instance.CanCollide then return false end
+    return true
+end
+
+local function LixoFindInteractive(position, radius)
+    radius = radius or 12
+    local best, bestDist, bestType = nil, radius, nil
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") and obj.Enabled then
+            local parent = obj.Parent
+            if parent then
+                local pp
+                if parent:IsA("BasePart") then pp = parent.Position
+                else local p = parent:FindFirstChildWhichIsA("BasePart"); if p then pp = p.Position end end
+                if pp then
+                    local dist = (pp - position).Magnitude
+                    if dist < bestDist then bestDist = dist; best = obj; bestType = "prompt" end
+                end
+            end
+        end
+    end
+    if not best then
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("ClickDetector") then
+                local parent = obj.Parent
+                if parent and parent:IsA("BasePart") then
+                    local dist = (parent.Position - position).Magnitude
+                    if dist < bestDist then bestDist = dist; best = obj; bestType = "click" end
+                end
+            end
+        end
+    end
+    return best, bestType
+end
+
+local function LixoSafeInteract(target, targetType)
+    local vs = Camera.ViewportSize
+    local success = false
+    if targetType == "prompt" then
+        success = pcall(function()
+            target:InputHoldBegin()
+            task.wait(target.HoldDuration > 0 and target.HoldDuration or 0.2)
+            target:InputHoldEnd()
+        end)
+        if not success then success = pcall(function() fireproximityprompt(target) end) end
+        if not success then
+            pcall(function()
+                UserInputService:SendMouseButton(Vector2.new(vs.X/2, vs.Y/2), Enum.UserInputType.MouseButton1, true)
+                task.wait(0.08)
+                UserInputService:SendMouseButton(Vector2.new(vs.X/2, vs.Y/2), Enum.UserInputType.MouseButton1, false)
+            end)
+            success = true
+        end
+    elseif targetType == "click" then
+        success = pcall(function() fireclickdetector(target) end)
+        if not success then
+            pcall(function()
+                UserInputService:SendMouseButton(Vector2.new(vs.X/2, vs.Y/2), Enum.UserInputType.MouseButton1, true)
+                task.wait(0.08)
+                UserInputService:SendMouseButton(Vector2.new(vs.X/2, vs.Y/2), Enum.UserInputType.MouseButton1, false)
+            end)
+            success = true
+        end
+    else
+        pcall(function()
+            UserInputService:SendMouseButton(Vector2.new(vs.X/2, vs.Y/2), Enum.UserInputType.MouseButton1, true)
+            task.wait(0.08)
+            UserInputService:SendMouseButton(Vector2.new(vs.X/2, vs.Y/2), Enum.UserInputType.MouseButton1, false)
+        end)
+        success = true
+    end
+    return success
+end
+
+local function LixoClickMouse(centerX, centerY)
+    local ok1 = pcall(function()
+        if UserInputService.SendMouseButton then
+            UserInputService:SendMouseButton(Vector2.new(centerX, centerY), Enum.UserInputType.MouseButton1, true)
+            task.wait(0.08)
+            UserInputService:SendMouseButton(Vector2.new(centerX, centerY), Enum.UserInputType.MouseButton1, false)
+            return true
+        end
+        return false
+    end)
+    if ok1 then return true end
+    return pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton1(Vector2.new(centerX, centerY))
+        task.wait(0.5)
+        return true
+    end)
+end
+
+local function LixoIsGone(originalPos, originalTarget)
+    if originalTarget and not originalTarget.Parent then return true end
+    if originalTarget and originalTarget.Parent and originalTarget.Parent:IsA("BasePart") then
+        if originalTarget.Parent.Transparency >= 0.9 then return true end
+    end
+    local found = LixoFindInteractive(originalPos, 5)
+    return not found
+end
+
+local function LixoWaitForHumanoid()
+    local char = LocalPlayer.Character if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid") if not hum then return end
+    local timeout = tick() + 3
+    while hum.MoveDirection.Magnitude > 0.1 and tick() < timeout do task.wait(0.1) end
+    task.wait(0.3)
+end
+
+-- ✅ LOOP PRINCIPAL CORRIGIDO
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+
+        -- ✅ Se desativado, para QUALQUER movimento pendente
+        if not Config.Lixo.Enabled then
+            SkipCurrentLixoRequest = false
+            local char = LocalPlayer.Character
+            if char then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hrp and hum then
+                    hum:MoveTo(hrp.Position)  -- Para de andar
+                end
+            end
+            continue
+        end
+
+        -- ✅ Verifica se pediram pra pular ANTES de tudo
+        if SkipCurrentLixoRequest then
+            SkipCurrentLixoRequest = false
+            if CurrentLixoIndex and LIXO_POSITIONS[CurrentLixoIndex] then
+                LixoIgnored[LIXO_POSITIONS[CurrentLixoIndex]] = true
+                LixoUpdateStatus("⏭️ Lixo pulado!")
+                CurrentLixoIndex = nil
+            end
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum:MoveTo(char.HumanoidRootPart.Position) end
+            end
+            task.wait(0.3)
+            continue
+        end
+
+        local char = LocalPlayer.Character
+        if not char then continue end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum or hum.Health <= 0 then continue end
+
+        -- ENTREGA
+        if Config.Lixo.Coletados >= Config.Lixo.MaxColetas then
+            LixoUpdateStatus("🚚 Indo entregar...")
+            if (hrp.Position - DELIVERY_POSITION).Magnitude > 5 then
+                hum:MoveTo(DELIVERY_POSITION)
+                task.wait(0.5)
+                continue
+            end
+
+            LixoUpdateStatus("📦 Chegando na caçamba...")
+            hum:MoveTo(hrp.Position)
+            LixoWaitForHumanoid()
+            task.wait(1)
+
+            local success = false
+            for attempt = 1, 5 do
+                if not Config.Lixo.Enabled then break end
+                local target, targetType = LixoFindInteractive(DELIVERY_POSITION, 15)
+                if target then
+                    LixoUpdateStatus("🖐️ Interagindo (" .. attempt .. "/5)...")
+                    LixoSafeInteract(target, targetType)
+                    local startT = tick()
+                    while tick() - startT < DELIVER_WAIT do
+                        task.wait(0.2)
+                        if not Config.Lixo.Enabled then break end
+                        if LixoIsGone(DELIVERY_POSITION, target) then success = true; break end
+                    end
+                    if success then break end
+                else
+                    LixoUpdateStatus("🖱️ Clicando na caçamba (" .. attempt .. "/5)...")
+                    local vs = Camera.ViewportSize
+                    LixoClickMouse(vs.X / 2, vs.Y / 2)
+                    task.wait(DELIVER_WAIT)
+                    success = true
+                    break
+                end
+                task.wait(0.5)
+            end
+
+            if success and Config.Lixo.Enabled then
+                LixoUpdateStatus("✅ Entregue! Reiniciando...")
+                Config.Lixo.Coletados = 0
+                LixoIgnored = {}
+                task.wait(2)
+            else
+                task.wait(2)
+            end
+            continue
+        end
+
+        -- COLETA (ignorando os que foram pulados)
+        local nearest, nearestTarget, nearestType = nil, nil, nil
+        local nearestIndex = nil
+        local nearestDist = math.huge
+        for i, pos in ipairs(LIXO_POSITIONS) do
+            if not LixoIgnored[pos] then
+                local dist = (hrp.Position - pos).Magnitude
+                if dist < nearestDist then
+                    local target, targetType = LixoFindInteractive(pos, 12)
+                    if target and LixoIsPathClear(hrp.Position, pos) then
+                        nearest, nearestTarget, nearestType, nearestDist, nearestIndex = pos, target, targetType, dist, i
+                    end
+                end
+            end
+        end
+
+        if not nearest then
+            local totalIgnored = 0
+            for _ in pairs(LixoIgnored) do totalIgnored = totalIgnored + 1 end
+            if totalIgnored >= #LIXO_POSITIONS then
+                LixoIgnored = {}
+                LixoUpdateStatus("🔄 Todos pulados! Reiniciando...")
+                task.wait(1)
+                continue
+            else
+                LixoUpdateStatus("❌ Nenhum lixo disponível")
+                task.wait(1)
+                continue
+            end
+        end
+
+        CurrentLixoIndex = nearestIndex
+
+        -- ✅ Ir até o lixo COM verificação de skip DENTRO do loop
+        LixoUpdateStatus("🚶 Indo até o lixo...")
+        hum:MoveTo(nearest)
+        local timeout = tick() + 20
+        local skipped = false
+        while tick() < timeout do
+            task.wait(0.2)
+
+            -- ✅ Se desativou, para tudo
+            if not Config.Lixo.Enabled then
+                hum:MoveTo(hrp.Position)
+                skipped = true
+                break
+            end
+
+            -- ✅ Se clicou em "Próximo Lixo", para e ignora
+            if SkipCurrentLixoRequest then
+                SkipCurrentLixoRequest = false
+                LixoIgnored[nearest] = true
+                hum:MoveTo(hrp.Position)
+                LixoUpdateStatus("⏭️ Lixo pulado!")
+                CurrentLixoIndex = nil
+                skipped = true
+                break
+            end
+
+            if (hrp.Position - nearest).Magnitude <= 4 then break end
+            if hum.MoveDirection.Magnitude < 0.1 then hum:MoveTo(nearest) end
+        end
+
+        if skipped then
+            task.wait(0.3)
+            continue
+        end
+
+        if (hrp.Position - nearest).Magnitude > 6 then
+            LixoUpdateStatus("⚠️ Não conseguiu chegar")
+            LixoIgnored[nearest] = true
+            task.wait(1)
+            continue
+        end
+
+        hum:MoveTo(hrp.Position)
+        LixoWaitForHumanoid()
+        LixoUpdateStatus("🖐️ Coletando...")
+
+        local collected = false
+        for attempt = 1, 3 do
+            if not Config.Lixo.Enabled then break end
+            local target, targetType = LixoFindInteractive(nearest, 12)
+            if not target then collected = true; break end
+            LixoSafeInteract(target, targetType)
+            LixoUpdateStatus("⏳ Coletando (" .. attempt .. "/3)...")
+            local startT = tick()
+            while tick() - startT < COLLECT_WAIT do
+                task.wait(0.15)
+                if not Config.Lixo.Enabled then break end
+                if LixoIsGone(nearest, target) then collected = true; break end
+            end
+            if collected then break end
+            task.wait(0.3)
+        end
+
+        if not collected and Config.Lixo.Enabled then
+            task.wait(0.5)
+            local stillThere = LixoFindInteractive(nearest, 10)
+            if not stillThere then collected = true end
+        end
+
+        if collected and Config.Lixo.Enabled then
+            Config.Lixo.Coletados = Config.Lixo.Coletados + 1
+            LixoUpdateStatus("✅ Coletado! (" .. Config.Lixo.Coletados .. "/" .. Config.Lixo.MaxColetas .. ")")
+            task.wait(0.3)
+        elseif Config.Lixo.Enabled then
+            LixoUpdateStatus("⚠️ Coleta falhou, pulando...")
+            LixoIgnored[nearest] = true
+            task.wait(0.5)
+        end
+    end
+end)
+
+-- ABA MAIN
+MainTab:Section({ Title = "⚡ Power", Icon = "zap" })
+MainTab:Button({
+    Title = "⚡ Abrir Painel do Power",
+    Desc = "Abre o painel flutuante do Power.",
+    Icon = "zap",
+    Callback = function()
+        if not PowerUI.Gui then CreateSwiftUI() end
+        PowerUI.Open = not PowerUI.Open
+        PowerUI.Gui.Enabled = PowerUI.Open
+    end,
+})
+
+MainTab:Section({ Title = "🛡️ Staff", Icon = "shield" })
+MainTab:Button({
+    Title = "🛡️ Abrir Painel Staff",
+    Desc = "Abre o painel para detectar jogadores que parecem staff.",
+    Icon = "shield",
+    Callback = function()
+        if not StaffPanel.Gui then
+            CreateStaffPanel()
+            StaffPanel.Gui.Enabled = true
+            StaffPanel.Open = true
+        else
+            StaffPanel.Open = not StaffPanel.Open
+            StaffPanel.Gui.Enabled = StaffPanel.Open
+        end
+    end,
+})
+
+MainTab:Section({ Title = "♻️ Coleta de Lixo Automática", Icon = "trash-2" })
+
+MainTab:Toggle({
+    Title = "♻️ Coleta Automática",
+    Desc = "Ativado: o personagem coleta lixos sozinho. Os controles de andar/pular ficam bloqueados.",
+    Icon = "trash-2", Value = false,
+    Callback = function(state)
+        Config.Lixo.Enabled = state
+        Config.Lixo.Coletados = 0
+        LixoIgnored = {}
+        CurrentLixoIndex = nil
+        SkipCurrentLixoRequest = false
+
+        if state then
+            -- ✅ BLOQUEIA controles do jogador
+            BlockPlayerControls()
+            
+            local char = LocalPlayer.Character
+            if char then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hrp and hum then
+                    local nearest, nearestDist = nil, math.huge
+                    for _, pos in ipairs(LIXO_POSITIONS) do
+                        local dist = (hrp.Position - pos).Magnitude
+                        if dist < nearestDist then nearest, nearestDist = pos, dist end
+                    end
+                    if nearest then hum:MoveTo(nearest) end
+                end
+            end
+            WindUI:Notify({ Title = "Coleta Automática", Content = "Ativada! Controles bloqueados.", Duration = 2 })
+        else
+            -- ✅ DESBLOQUEIA controles do jogador
+            UnblockPlayerControls()
+            
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum:MoveTo(char.HumanoidRootPart.Position) end
+            end
+            WindUI:Notify({ Title = "Coleta Automática", Content = "Desativada.", Duration = 2 })
+        end
+    end,
+})
+
+local function CreateLixoInput()
+    local ok = pcall(function()
+        MainTab:Input({
+            Title = "Quantidade Máxima de Lixo",
+            Desc = "Digite o número de lixos a coletar antes de entregar (1 a 100).",
+            Icon = "hash", Value = "10",
+            Callback = function(text)
+                local num = tonumber(text)
+                if num and num > 0 and num <= 100 then Config.Lixo.MaxColetas = math.floor(num) end
+            end,
+        })
+    end)
+    if not ok then
+        pcall(function()
+            MainTab:Slider({
+                Title = "Quantidade Máxima de Lixo",
+                Desc = "Quantos lixos coletar antes de entregar.",
+                Icon = "hash",
+                Value = { Min = 1, Max = 50, Default = 10 }, Step = 1,
+                Callback = function(v) Config.Lixo.MaxColetas = math.floor(v) end,
+            })
+        end)
+    end
+end
+CreateLixoInput()
+
+MainTab:Toggle({
+    Title = "Evitar Paredes",
+    Desc = "Ativado: verifica se há parede entre você e o lixo antes de ir.",
+    Icon = "wall", Value = true,
+    Callback = function(s) Config.Lixo.CheckWall = s end,
+})
+
+MainTab:Toggle({
+    Title = "Mostrar Painel de Status",
+    Desc = "Ativado: mostra uma janela arrastável com o progresso e um botão para pular lixo.",
+    Icon = "activity", Value = false,
+    Callback = function(state)
+        if state then
+            if not Config.Lixo.StatusGui then
+                local gui = Instance.new("ScreenGui")
+                gui.Name = "LixoStatus_" .. tostring(math.random(100000, 999999))
+                gui.ResetOnSpawn = false gui.IgnoreGuiInset = true gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling gui.DisplayOrder = 998
+                pcall(function() gui.Parent = CoreGui end)
+                if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+                local main = Instance.new("Frame")
+                main.Size = UDim2.new(0, 220, 0, 145)
+                main.Position = UDim2.new(0.5, -110, 0.75, 0)
+                main.BackgroundColor3 = Color3.fromRGB(12, 12, 14) main.BorderSizePixel = 0 main.Active = true main.Parent = gui
+                Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+                local stroke = Instance.new("UIStroke", main) stroke.Color = Color3.fromRGB(100, 200, 100) stroke.Thickness = 1.5 stroke.Transparency = 0.3
+
+                local topbar = Instance.new("Frame")
+                topbar.Size = UDim2.new(1, 0, 0, 22) topbar.BackgroundColor3 = Color3.fromRGB(10, 25, 10) topbar.BorderSizePixel = 0 topbar.Active = true topbar.Parent = main
+                Instance.new("UICorner", topbar).CornerRadius = UDim.new(0, 8)
+
+                local title = Instance.new("TextLabel")
+                title.Size = UDim2.new(1, -30, 1, 0) title.Position = UDim2.new(0, 8, 0, 0) title.BackgroundTransparency = 1
+                title.Text = "♻️ Coleta de Lixo" title.TextColor3 = Color3.fromRGB(150, 255, 150) title.TextSize = 11 title.Font = Enum.Font.GothamBold title.TextXAlignment = Enum.TextXAlignment.Left title.Parent = topbar
+
+                local close = Instance.new("TextButton")
+                close.Size = UDim2.new(0, 18, 0, 18) close.Position = UDim2.new(1, -22, 0, 2)
+                close.BackgroundColor3 = Color3.fromRGB(60, 20, 20) close.BorderSizePixel = 0 close.Text = "X" close.TextColor3 = Color3.fromRGB(255, 200, 200) close.TextSize = 10 close.Font = Enum.Font.GothamBold close.Parent = topbar
+                Instance.new("UICorner", close).CornerRadius = UDim.new(0, 4)
+                close.MouseButton1Click:Connect(function() gui.Enabled = false end)
+
+                local statusLbl = Instance.new("TextLabel")
+                statusLbl.Size = UDim2.new(1, -16, 0, 18) statusLbl.Position = UDim2.new(0, 8, 0, 26)
+                statusLbl.BackgroundTransparency = 1 statusLbl.Text = "Aguardando..." statusLbl.TextColor3 = Color3.fromRGB(200, 200, 200) statusLbl.TextSize = 10 statusLbl.Font = Enum.Font.Gotham statusLbl.TextXAlignment = Enum.TextXAlignment.Left statusLbl.Parent = main
+
+                local countLbl = Instance.new("TextLabel")
+                countLbl.Size = UDim2.new(1, -16, 0, 20) countLbl.Position = UDim2.new(0, 8, 0, 46)
+                countLbl.BackgroundTransparency = 1 countLbl.Text = "0 / 10" countLbl.TextColor3 = Color3.fromRGB(100, 200, 255) countLbl.TextSize = 14 countLbl.Font = Enum.Font.GothamBold countLbl.TextXAlignment = Enum.TextXAlignment.Left countLbl.Parent = main
+
+                local progressBg = Instance.new("Frame")
+                progressBg.Size = UDim2.new(1, -16, 0, 8)
+                progressBg.Position = UDim2.new(0, 8, 0, 74)
+                progressBg.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+                progressBg.BorderSizePixel = 0 progressBg.Parent = main
+                Instance.new("UICorner", progressBg).CornerRadius = UDim.new(1, 0)
+
+                local progressFill = Instance.new("Frame")
+                progressFill.Size = UDim2.new(0, 0, 1, 0)
+                progressFill.BackgroundColor3 = Color3.fromRGB(50, 220, 50)
+                progressFill.BorderSizePixel = 0 progressFill.Parent = progressBg
+                Instance.new("UICorner", progressFill).CornerRadius = UDim.new(1, 0)
+
+                local nextBtn = Instance.new("TextButton")
+                nextBtn.Size = UDim2.new(1, -16, 0, 28)
+                nextBtn.Position = UDim2.new(0, 8, 0, 92)
+                nextBtn.BackgroundColor3 = Color3.fromRGB(200, 130, 30)
+                nextBtn.BorderSizePixel = 0
+                nextBtn.Text = "⏭️ Próximo Lixo"
+                nextBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                nextBtn.TextSize = 11
+                nextBtn.Font = Enum.Font.GothamBold
+                nextBtn.Parent = main
+                Instance.new("UICorner", nextBtn).CornerRadius = UDim.new(0, 6)
+                nextBtn.MouseButton1Click:Connect(function()
+                    SkipCurrentLixoRequest = true
+                end)
+                LixoStatusRefs.NextButton = nextBtn
+
+                makeDraggable(main, topbar)
+                Config.Lixo.StatusGui = gui
+                LixoStatusRefs.StatusLabel = statusLbl
+                LixoStatusRefs.CountLabel = countLbl
+                LixoStatusRefs.ProgressFill = progressFill
+            end
+            Config.Lixo.StatusGui.Enabled = true
+        else
+            if Config.Lixo.StatusGui then Config.Lixo.StatusGui.Enabled = false end
+        end
+    end,
+})
+
+-- ============================================
+-- AIMBOT FLOATING
+-- ============================================
+local aimbotGui, aimbotFrame, floatingToggleBtn, floatingTargetBtn, restoreBtn
+
+function updateFloatingToggle()
+    if not floatingToggleBtn then return end
+    if Config.Aimbot.Enabled then
+        floatingToggleBtn.Text = "Aimbot: ON"
+        floatingToggleBtn.BackgroundColor3 = Color3.fromRGB(58, 66, 88)
+    else
+        floatingToggleBtn.Text = "Aimbot: OFF"
+        floatingToggleBtn.BackgroundColor3 = Color3.fromRGB(32, 32, 42)
+    end
+end
+
+function updateFloatingTarget()
+    if not floatingTargetBtn then return end
+    local part = Config.Aimbot.TargetPart
+    local other = (part == "Head") and "Torso" or "Head"
+    local t = Config.Aimbot.LockedTarget
+    if t then
+        floatingTargetBtn.Text = part .. " 🔒 " .. t.Name .. "  ▸ " .. other
+        floatingTargetBtn.TextColor3 = Color3.fromRGB(120, 200, 140)
+    else
+        floatingTargetBtn.Text = part .. "  ▸ " .. other
+        floatingTargetBtn.TextColor3 = Color3.fromRGB(200, 205, 220)
+    end
+end
+
+function destroyAimbotFloatingWindow()
+    if aimbotGui then
+        aimbotGui:Destroy()
+        aimbotGui, aimbotFrame, floatingToggleBtn, floatingTargetBtn, restoreBtn = nil, nil, nil, nil, nil
+    end
+end
+
+function createAimbotFloatingWindow()
+    if aimbotGui then return end
+    aimbotGui = Instance.new("ScreenGui") aimbotGui.Name = "AimbotFloating" aimbotGui.ResetOnSpawn = false aimbotGui.IgnoreGuiInset = true aimbotGui.DisplayOrder = 999
+    pcall(function() aimbotGui.Parent = CoreGui end)
+    if not aimbotGui.Parent then aimbotGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+    aimbotFrame = Instance.new("Frame") aimbotFrame.Size = UDim2.fromOffset(210, 168) aimbotFrame.Position = UDim2.new(0.75, 0, 0.25, 0)
+    aimbotFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 38) aimbotFrame.BorderSizePixel = 0 aimbotFrame.Active = true aimbotFrame.Parent = aimbotGui
+    Instance.new("UICorner", aimbotFrame).CornerRadius = UDim.new(0, 8)
+
+    local titleBar = Instance.new("Frame") titleBar.Size = UDim2.new(1, 0, 0, 26)
+    titleBar.BackgroundColor3 = Color3.fromRGB(45, 45, 65) titleBar.BorderSizePixel = 0 titleBar.Active = true titleBar.Parent = aimbotFrame
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 8)
+
+    local titleLbl = Instance.new("TextLabel") titleLbl.Size = UDim2.new(1, -28, 1, 0) titleLbl.Position = UDim2.fromOffset(8, 0)
+    titleLbl.BackgroundTransparency = 1 titleLbl.Text = "Aimbot" titleLbl.TextColor3 = Color3.fromRGB(220, 220, 255)
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left titleLbl.Font = Enum.Font.GothamBold titleLbl.TextSize = 13 titleLbl.Parent = titleBar
+
+    local closeBtn = Instance.new("TextButton") closeBtn.Size = UDim2.fromOffset(20, 20) closeBtn.Position = UDim2.new(1, -24, 0, 3)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(110, 40, 40) closeBtn.BorderSizePixel = 0 closeBtn.Text = "×"
+    closeBtn.TextColor3 = Color3.fromRGB(230, 210, 210) closeBtn.Font = Enum.Font.GothamBold closeBtn.TextSize = 14 closeBtn.Parent = titleBar
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
+    closeBtn.MouseButton1Click:Connect(function()
+        Config.Aimbot.Enabled = false Config.Aimbot.ShowPanel = false Config.Aimbot.LockedTarget = nil
+        if aimbotToggle and aimbotToggle.Set then pcall(function() aimbotToggle:Set(false) end) end
+        destroyAimbotFloatingWindow()
+    end)
+
+    local content = Instance.new("Frame") content.Size = UDim2.new(1, -16, 1, -34) content.Position = UDim2.fromOffset(8, 30)
+    content.BackgroundTransparency = 1 content.Parent = aimbotFrame
+    Instance.new("UIListLayout", content).Padding = UDim.new(0, 6)
+
+    floatingToggleBtn = Instance.new("TextButton") floatingToggleBtn.Size = UDim2.new(1, 0, 0, 32)
+    floatingToggleBtn.BackgroundColor3 = Color3.fromRGB(32, 32, 42) floatingToggleBtn.BorderSizePixel = 0
+    floatingToggleBtn.Font = Enum.Font.GothamBold floatingToggleBtn.TextSize = 12 floatingToggleBtn.TextColor3 = Color3.fromRGB(190, 195, 210) floatingToggleBtn.Parent = content
+    Instance.new("UICorner", floatingToggleBtn).CornerRadius = UDim.new(0, 6)
+    floatingToggleBtn.MouseButton1Click:Connect(function()
+        Config.Aimbot.Enabled = not Config.Aimbot.Enabled
+        Config.Aimbot.LockedTarget = nil
+        updateFloatingToggle() updateFloatingTarget()
+    end)
+
+    floatingTargetBtn = Instance.new("TextButton") floatingTargetBtn.Size = UDim2.new(1, 0, 0, 24)
+    floatingTargetBtn.BackgroundColor3 = Color3.fromRGB(32, 32, 42) floatingTargetBtn.BorderSizePixel = 0
+    floatingTargetBtn.Font = Enum.Font.GothamBold floatingTargetBtn.TextSize = 11 floatingTargetBtn.TextColor3 = Color3.fromRGB(200, 205, 220) floatingTargetBtn.Parent = content
+    Instance.new("UICorner", floatingTargetBtn).CornerRadius = UDim.new(0, 6)
+    floatingTargetBtn.MouseButton1Click:Connect(function()
+        Config.Aimbot.TargetPart = (Config.Aimbot.TargetPart == "Head") and "Torso" or "Head"
+        if UI.AimbotPart and UI.AimbotPart.Set then pcall(function() UI.AimbotPart:Set(Config.Aimbot.TargetPart) end) end
+        updateFloatingTarget()
+    end)
+
+    local minBtn = Instance.new("TextButton") minBtn.Size = UDim2.new(1, 0, 0, 24)
+    minBtn.BackgroundColor3 = Color3.fromRGB(32, 32, 42) minBtn.BorderSizePixel = 0 minBtn.Text = "Minimizar"
+    minBtn.TextColor3 = Color3.fromRGB(190, 195, 210) minBtn.Font = Enum.Font.GothamBold minBtn.TextSize = 11 minBtn.Parent = content
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+    minBtn.MouseButton1Click:Connect(function() aimbotFrame.Visible = false restoreBtn.Visible = true end)
+
+    restoreBtn = Instance.new("TextButton") restoreBtn.Size = UDim2.fromOffset(90, 28) restoreBtn.Position = UDim2.new(0.75, 0, 0.25, 0)
+    restoreBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 65) restoreBtn.BorderSizePixel = 0 restoreBtn.Text = "Aimbot ⤢"
+    restoreBtn.TextColor3 = Color3.fromRGB(220, 220, 255) restoreBtn.Font = Enum.Font.GothamBold restoreBtn.TextSize = 12
+    restoreBtn.Visible = false restoreBtn.Parent = aimbotGui
+    Instance.new("UICorner", restoreBtn).CornerRadius = UDim.new(0, 6)
+    restoreBtn.MouseButton1Click:Connect(function() aimbotFrame.Visible = true restoreBtn.Visible = false end)
+
+    makeDraggable(aimbotFrame, titleBar)
+    makeDraggable(restoreBtn, restoreBtn)
+    updateFloatingToggle() updateFloatingTarget()
+end
+
+-- FOV CIRCLE
+local fovCircle = Drawing.new("Circle")
+fovCircle.Color = Config.Aimbot.FOVColor fovCircle.Thickness = Config.Aimbot.FOVThickness
+fovCircle.NumSides = 60 fovCircle.Radius = Config.Aimbot.FOV fovCircle.Filled = false
+fovCircle.Transparency = Config.Aimbot.FOVTransparency fovCircle.Visible = false
+
+RunService.RenderStepped:Connect(function()
+    if Config.Aimbot.ShowFOV then
+        local vs = Camera.ViewportSize
+        fovCircle.Position = Vector2.new(vs.X / 2, vs.Y / 2)
+        fovCircle.Radius = Config.Aimbot.FOV
+        fovCircle.Thickness = Config.Aimbot.FOVThickness
+        fovCircle.Transparency = Config.Aimbot.FOVTransparency
+        fovCircle.Color = Config.Aimbot.FOVColor
+        fovCircle.Visible = true
+    else
+        fovCircle.Visible = false
+    end
+end)
+
+-- AIMBOT LOGIC
+local function shouldReleaseLock(player)
+    if not player or not player.Parent then return true end
+    if player == LocalPlayer then return true end
+    if isTeammateOf(player, Config.Aimbot.TeamCheck) then return true end
+    if not player.Character then return true end
+    local hum = player.Character:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return true end
+    return false
+end
+
+local function canAimAt(player)
+    if not player or not player.Character then return false, nil end
+    local hum = player.Character:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false, nil end
+    local part = getAimbotTargetPart(player.Character)
+    if not part then return false, nil end
+    return true, part
+end
+
+local function findNewTarget(myRoot, excludePlayer, mode)
+    mode = mode or "default"
+    local candidates = {}
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player ~= excludePlayer and player.Character then
+            if not isTeammateOf(player, Config.Aimbot.TeamCheck) then
+                local char = player.Character
+                local hum  = char:FindFirstChildOfClass("Humanoid")
+                local part = getAimbotTargetPart(char)
+                if part and hum and hum.Health > 0 then
+                    local dist = (part.Position - myRoot.Position).Magnitude
+                    if not (Config.Aimbot.LimitToDistance and dist > Config.Aimbot.MaxDistance) then
+                        local scrPos   = getScreenInfo(part)
+                        local onScreen = scrPos ~= nil
+                        local inFOV    = false
+                        if onScreen then inFOV = (scrPos - center).Magnitude <= Config.Aimbot.FOV end
+                        local passFOV = (mode == "hidden") or (not Config.Aimbot.FOVAffectsAim) or inFOV
+                        if passFOV then
+                            local needLoS = (mode == "visible" and Config.Aimbot.VisibleOnly) or (mode == "default")
+                            local los = needLoS and isVisible(part) or nil
+                            table.insert(candidates, { player = player, dist = dist, onScreen = onScreen, los = los })
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if #candidates == 0 then return nil end
+    if mode == "hidden" then
+        local hiddenList = {}
+        for _, c in ipairs(candidates) do if not c.onScreen then table.insert(hiddenList, c) end end
+        local pool = (#hiddenList > 0) and hiddenList or candidates
+        table.sort(pool, function(a, b) return a.dist < b.dist end)
+        return pool[1].player
+    end
+    if mode == "visible" then
+        local visList = {}
+        for _, c in ipairs(candidates) do
+            if c.onScreen and (not Config.Aimbot.VisibleOnly or c.los) then table.insert(visList, c) end
+        end
+        if #visList > 0 then table.sort(visList, function(a, b) return a.dist < b.dist end) return visList[1].player end
+        return nil
+    end
+    if Config.Aimbot.VisibleOnly then
+        local visList = {}
+        for _, c in ipairs(candidates) do if c.los then table.insert(visList, c) end end
+        table.sort(visList, function(a, b) return a.dist < b.dist end)
+        return visList[1] and visList[1].player or nil
+    else
+        table.sort(candidates, function(a, b) return a.dist < b.dist end)
+        return candidates[1].player
+    end
+end
+
+local lastLockShown = nil
+RunService.RenderStepped:Connect(function()
+    if not Config.Aimbot.Enabled then return end
+    if Config.Aimbot.HotkeyEnabled and not aimbotHolding then return end
+    local myChar = LocalPlayer.Character
+    if not myChar then return end
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+
+    if Config.Aimbot.LockedTarget and shouldReleaseLock(Config.Aimbot.LockedTarget) then
+        Config.Aimbot.LockedTarget = nil
+        lastLockShown = nil
+    end
+
+    if not Config.Aimbot.LockedTarget then
+        Config.Aimbot.LockedTarget = Config.Aimbot.Unfocused and findNewTarget(myRoot, nil, "visible") or findNewTarget(myRoot, nil, "default")
+    end
+
+    if Config.Aimbot.LockedTarget ~= lastLockShown then
+        lastLockShown = Config.Aimbot.LockedTarget
+        updateFloatingTarget()
+    end
+
+    local locked = Config.Aimbot.LockedTarget
+    if not locked then return end
+    local canAim, part = canAimAt(locked)
+    if not canAim then return end
+    if Config.Aimbot.LimitToDistance and (part.Position - myRoot.Position).Magnitude > Config.Aimbot.MaxDistance then return end
+    if Config.Aimbot.VisibleOnly and not isVisible(part) then return end
+
+    local aimPos = getPredictedPosition(part, Camera.CFrame.Position)
+    if not aimPos then return end
+
+    local goal  = CFrame.new(Camera.CFrame.Position, aimPos)
+    local alpha = math.clamp(Config.Aimbot.Sensitivity * Config.Aimbot.Strength, 0, 1)
+    Camera.CFrame = Camera.CFrame:Lerp(goal, alpha)
+end)
+
+-- ESP TRACKER
+local espDrawings = {}
+
+local function clearDrawings(player)
+    if espDrawings[player] then
+        for _, d in pairs(espDrawings[player]) do
+            if d and d.Remove then pcall(function() d:Remove() end) end
+        end
+        espDrawings[player] = nil
+    end
+    if player.Character then
+        for _, obj in ipairs(player.Character:GetChildren()) do
+            if obj:IsA("Highlight") then obj:Destroy() end
+        end
+    end
+end
+
+local function updateESP()
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if isTeammateOf(player, Config.ESP.TeamCheck) then clearDrawings(player); continue end
+        local char = player.Character
+        if not char then clearDrawings(player); continue end
+
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local head = char:FindFirstChild("Head")
+        local hum  = char:FindFirstChildOfClass("Humanoid")
+        if not (root and head and hum) then clearDrawings(player); continue end
+
+        local dist = (root.Position - myRoot.Position).Magnitude
+        if dist > Config.ESP.MaxDistance then clearDrawings(player); continue end
+        if not Config.ESP.ThroughWalls and not isVisible(head) then clearDrawings(player); continue end
+
+        local d = espDrawings[player] or {}
+        espDrawings[player] = d
+
+        local topPos, topOn = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+        local bottomPos, bottomOn = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3, 0))
+
+        if topOn and bottomOn then
+            local height = math.abs(bottomPos.Y - topPos.Y)
+            local width = height * 0.5
+            local x = topPos.X - width / 2
+            local y = topPos.Y
+
+            if Config.ESP.Highlight then
+                if not d.highlightFill then
+                    d.highlightFill = Drawing.new("Square")
+                    d.highlightFill.Filled = true
+                    d.highlightFill.Thickness = 0
+                end
+                local transp = math.clamp((1 - Config.ESP.HighlightIntensity) * 0.8 + 0.15, 0.1, 0.85)
+                d.highlightFill.Color = Config.ESP.HighlightColor
+                d.highlightFill.Transparency = transp
+                d.highlightFill.Size = Vector2.new(width + 4, height + 4)
+                d.highlightFill.Position = Vector2.new(x - 2, y - 2)
+                d.highlightFill.Visible = true
+
+                if not d.highlightOutline then
+                    d.highlightOutline = Drawing.new("Square")
+                    d.highlightOutline.Filled = false
+                end
+                d.highlightOutline.Color = Config.ESP.HighlightColor
+                d.highlightOutline.Thickness = Config.ESP.HighlightThickness
+                d.highlightOutline.Transparency = 1
+                d.highlightOutline.Size = Vector2.new(width + 4, height + 4)
+                d.highlightOutline.Position = Vector2.new(x - 2, y - 2)
+                d.highlightOutline.Visible = true
+            else
+                if d.highlightFill then d.highlightFill.Visible = false end
+                if d.highlightOutline then d.highlightOutline.Visible = false end
+            end
+
+            if Config.ESP.Box then
+                if not d.box then
+                    d.box = Drawing.new("Square")
+                    d.box.Thickness = 1
+                    d.box.Filled = false
+                end
+                d.box.Color = Config.ESP.BoxColor
+                d.box.Size = Vector2.new(width, height)
+                d.box.Position = Vector2.new(x, y)
+                d.box.Visible = true
+            elseif d.box then
+                d.box.Visible = false
+            end
+
+            if Config.ESP.Lines then
+                if not d.line then
+                    d.line = Drawing.new("Line")
+                    d.line.Thickness = 1
+                end
+                d.line.Color = Config.ESP.LinesColor
+                d.line.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+                d.line.To = Vector2.new(topPos.X, topPos.Y + height / 2)
+                d.line.Visible = true
+            elseif d.line then
+                d.line.Visible = false
+            end
+
+            if Config.ESP.Health then
+                if not d.health then
+                    d.health = Drawing.new("Square")
+                    d.health.Thickness = 2
+                    d.health.Filled = true
+                end
+                local hpPct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                local hpHeight = height * hpPct
+                d.health.Size = Vector2.new(4, hpHeight)
+                d.health.Position = Vector2.new(x - 8, y + (height - hpHeight))
+                d.health.Color = Color3.fromRGB(255 * (1 - hpPct), 255 * hpPct, 0)
+                d.health.Visible = true
+            elseif d.health then
+                d.health.Visible = false
+            end
+
+            if Config.ESP.ShowName or Config.ESP.ShowDistance then
+                if not d.text then
+                    d.text = Drawing.new("Text")
+                    d.text.Size = 14
+                    d.text.Center = true
+                    d.text.Outline = true
+                    d.text.OutlineColor = Color3.fromRGB(0, 0, 0)
+                    d.text.Color = Color3.fromRGB(255, 255, 255)
+                    d.text.Font = 2
+                end
+                local parts = {}
+                if Config.ESP.ShowName then table.insert(parts, player.Name) end
+                if Config.ESP.ShowDistance then table.insert(parts, math.floor(dist) .. "m") end
+                d.text.Text = table.concat(parts, " | ")
+                d.text.Position = Vector2.new(topPos.X, y - Config.ESP.TextHeightOffset)
+                d.text.Visible = true
+            elseif d.text then
+                d.text.Visible = false
+            end
+        else
+            if d.highlightFill then d.highlightFill.Visible = false end
+            if d.highlightOutline then d.highlightOutline.Visible = false end
+            if d.box then d.box.Visible = false end
+            if d.line then d.line.Visible = false end
+            if d.health then d.health.Visible = false end
+            if d.text then d.text.Visible = false end
+        end
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    pcall(updateESP)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    clearDrawings(player)
+    if Config.Aimbot.LockedTarget == player then Config.Aimbot.LockedTarget = nil end
+end)
+
+-- ✅ Garante que ao morrer/respawnar os controles voltam
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    if Config.Lixo.Enabled then
+        BlockPlayerControls()
+    else
+        UnblockPlayerControls()
+    end
+end)
+
+WindUI:Notify({ Title = "Nug Hub", Content = "Script carregado! By Yuri_Ty", Duration = 3 })
+WindUI:SetNotificationLower(true)
